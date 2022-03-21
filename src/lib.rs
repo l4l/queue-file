@@ -651,11 +651,7 @@ impl QueueFile {
             return Err(err);
         }
 
-        if self.sync_writes {
-            self.file.sync_data()
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     fn transfer_inner(
