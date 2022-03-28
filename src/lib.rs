@@ -116,6 +116,8 @@ pub struct QueueFile {
     file_len: u64,
     /// Last seek value
     last_seek: Option<u64>,
+    /// Last iterator scan index and its offset.
+    last_iter_seek: Option<(usize, u64)>,
     /// Number of elements.
     elem_cnt: usize,
     /// Pointer to first (or eldest) element.
@@ -254,6 +256,7 @@ impl QueueFile {
             header_len,
             file_len,
             last_seek: Some(0),
+            last_iter_seek: None,
             elem_cnt,
             first: Element::EMPTY,
             last: Element::EMPTY,
@@ -363,6 +366,12 @@ impl QueueFile {
 
     /// Removes the eldest `n` elements.
     pub fn remove_n(&mut self, n: usize) -> Result<()> {
+        if self.last_iter_seek.map_or(false, |(idx, _)| idx <= n) {
+            self.last_iter_seek = None;
+        } else if let Some(seek) = self.last_iter_seek.as_mut() {
+            seek.0 -= n;
+        }
+
         if n == 0 || self.is_empty() {
             return Ok(());
         }
@@ -406,6 +415,7 @@ impl QueueFile {
     pub fn clear(&mut self) -> Result<()> {
         // Commit the header.
         self.write_header(QueueFile::INITIAL_LENGTH, 0, 0, 0)?;
+        self.last_iter_seek = None;
 
         if self.overwrite_on_remove {
             self.seek(self.header_len)?;
@@ -732,8 +742,30 @@ pub struct Iter<'a> {
     next_elem_pos: u64,
 }
 
+impl Drop for Iter<'_> {
+    fn drop(&mut self) {
+        self.queue_file.last_iter_seek = Some((self.next_elem_index, self.next_elem_pos));
+    }
+}
+
 impl<'a> Iterator for Iter<'a> {
     type Item = Box<[u8]>;
+
+    fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
+        if let Some((idx, pos)) = self.queue_file.last_iter_seek {
+            if idx <= n && idx > self.next_elem_index {
+                n -= idx;
+                self.next_elem_index = idx;
+                self.next_elem_pos = pos;
+            }
+        }
+
+        for _ in 0..n {
+            self.next()?;
+        }
+
+        self.next()
+    }
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.queue_file.is_empty() || self.next_elem_index >= self.queue_file.elem_cnt {
@@ -764,12 +796,14 @@ impl<'a> Iterator for Iter<'a> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::convert::TryInto;
     use std::fs::remove_file;
     use std::iter;
     use std::path::PathBuf;
 
     #[cfg(test)]
     use pretty_assertions::assert_eq;
+    use quickcheck::TestResult;
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
 
@@ -911,6 +945,31 @@ mod tests {
             REOPEN_PROB,
         );
         remove_file(&path).unwrap_or(());
+    }
+
+    #[quickcheck_macros::quickcheck]
+    fn skip_iter(skip: usize, items: Vec<i32>) -> TestResult {
+        if items.len() > 1024 {
+            return TestResult::discard();
+        }
+
+        let (path, mut qf) = new_queue_file(false);
+
+        for i in &items {
+            qf.add(&i.to_be_bytes()).unwrap();
+        }
+
+        let collected = qf
+            .iter()
+            .skip(skip)
+            .map(|x| i32::from_be_bytes((*x).try_into().unwrap()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(items.into_iter().skip(skip).collect::<Vec<_>>(), collected);
+
+        remove_file(&path).unwrap_or(());
+
+        TestResult::passed()
     }
 
     fn add_rand_n_elems(
