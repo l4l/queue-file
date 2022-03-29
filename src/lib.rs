@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[quickcheck_macros::quickcheck]
-    fn skip_iter(skip: usize, items: Vec<i32>) -> TestResult {
+    fn skip_iter(skip1: usize, skip2: usize, items: Vec<i32>) -> TestResult {
         if items.len() > 1024 {
             return TestResult::discard();
         }
@@ -959,13 +959,15 @@ mod tests {
             qf.add(&i.to_be_bytes()).unwrap();
         }
 
+        qf.iter().skip(skip1).for_each(|_| ());
+
         let collected = qf
             .iter()
-            .skip(skip)
+            .skip(skip2)
             .map(|x| i32::from_be_bytes((*x).try_into().unwrap()))
             .collect::<Vec<_>>();
 
-        assert_eq!(items.into_iter().skip(skip).collect::<Vec<_>>(), collected);
+        assert_eq!(items.into_iter().skip(skip2).collect::<Vec<_>>(), collected);
 
         remove_file(&path).unwrap_or(());
 
