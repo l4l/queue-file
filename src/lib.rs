@@ -232,21 +232,33 @@ impl QueueFile {
 
         let real_file_len = file.metadata()?.len();
 
-        ensure!(file_len <= real_file_len, CorruptedFileSnafu {
-            msg: format!(
-                "file is truncated. expected length was {} but actual length is {}",
-                file_len, real_file_len
-            )
-        });
-        ensure!(file_len >= header_len, CorruptedFileSnafu {
-            msg: format!("length stored in header ({}) is invalid", file_len)
-        });
-        ensure!(first_pos <= file_len, CorruptedFileSnafu {
-            msg: format!("position of the first element ({}) is beyond the file", first_pos)
-        });
-        ensure!(last_pos <= file_len, CorruptedFileSnafu {
-            msg: format!("position of the last element ({}) is beyond the file", last_pos)
-        });
+        ensure!(
+            file_len <= real_file_len,
+            CorruptedFileSnafu {
+                msg: format!(
+                    "file is truncated. expected length was {} but actual length is {}",
+                    file_len, real_file_len
+                )
+            }
+        );
+        ensure!(
+            file_len >= header_len,
+            CorruptedFileSnafu {
+                msg: format!("length stored in header ({}) is invalid", file_len)
+            }
+        );
+        ensure!(
+            first_pos <= file_len,
+            CorruptedFileSnafu {
+                msg: format!("position of the first element ({}) is beyond the file", first_pos)
+            }
+        );
+        ensure!(
+            last_pos <= file_len,
+            CorruptedFileSnafu {
+                msg: format!("position of the last element ({}) is beyond the file", last_pos)
+            }
+        );
 
         file.rewind()?;
 
@@ -439,7 +451,13 @@ impl QueueFile {
     pub fn iter(&mut self) -> Iter<'_> {
         let pos = self.first.pos;
 
-        Iter { queue_file: self, next_elem_index: 0, next_elem_pos: pos }
+        Iter {
+            queue_file: self,
+            prev_elem_pos: None,
+            elem_pos: None,
+            next_elem_index: 0,
+            next_elem_pos: pos,
+        }
     }
 
     /// Returns the amount of bytes used by the backed file.
@@ -738,13 +756,21 @@ impl Element {
 
 pub struct Iter<'a> {
     queue_file: &'a mut QueueFile,
+    prev_elem_pos: Option<u64>,
+    elem_pos: Option<u64>,
     next_elem_index: usize,
     next_elem_pos: u64,
 }
 
 impl Drop for Iter<'_> {
     fn drop(&mut self) {
-        self.queue_file.last_iter_seek = Some((self.next_elem_index, self.next_elem_pos));
+        self.queue_file.last_iter_seek = Some(if let Some(pos) = self.prev_elem_pos {
+            (self.next_elem_index - 2, pos)
+        } else if let Some(pos) = self.elem_pos {
+            (self.next_elem_index - 1, pos)
+        } else {
+            (self.next_elem_index, self.next_elem_pos)
+        });
     }
 }
 
@@ -768,11 +794,12 @@ impl<'a> Iterator for Iter<'a> {
     }
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.queue_file.is_empty() || self.next_elem_index >= self.queue_file.elem_cnt {
+        if self.next_elem_index >= self.queue_file.elem_cnt {
             return None;
         }
 
         let current = self.queue_file.read_element(self.next_elem_pos).ok()?;
+        self.prev_elem_pos = self.elem_pos.replace(self.next_elem_pos);
         self.next_elem_pos = self.queue_file.wrap_pos(current.pos + Element::HEADER_LENGTH as u64);
 
         let mut data = vec![0; current.len].into_boxed_slice();
@@ -818,8 +845,11 @@ mod tests {
 
     fn gen_rand_file_name() -> String {
         let mut rng = thread_rng();
-        let mut file_name =
-            iter::repeat(()).map(|()| rng.sample(Alphanumeric)).map(char::from).take(16).collect::<String>();
+        let mut file_name = iter::repeat(())
+            .map(|()| rng.sample(Alphanumeric))
+            .map(char::from)
+            .take(16)
+            .collect::<String>();
 
         file_name.push_str(".qf");
 
@@ -977,8 +1007,7 @@ mod tests {
     fn add_rand_n_elems(
         q: &mut VecDeque<Box<[u8]>>, qf: &mut QueueFile, min_n: usize, max_n: usize,
         min_data_size: usize, max_data_size: usize,
-    ) -> usize
-    {
+    ) -> usize {
         let mut rng = thread_rng();
 
         let n = rng.gen_range(min_n..max_n);
@@ -1017,8 +1046,7 @@ mod tests {
     fn simulate_use(
         path: &Path, mut qf: QueueFile, iters: usize, min_n: usize, max_n: usize,
         min_data_size: usize, max_data_size: usize, clear_prob: f64, reopen_prob: f64,
-    )
-    {
+    ) {
         let mut q: VecDeque<Box<[u8]>> = VecDeque::with_capacity(128);
 
         add_rand_n_elems(&mut q, &mut qf, min_n, max_n, min_data_size, max_data_size);
