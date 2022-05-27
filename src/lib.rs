@@ -859,6 +859,7 @@ impl QueueFileInner {
     fn write(&mut self, buf: &[u8]) -> io::Result<()> {
         self.real_seek()?;
 
+        self.read_buffer_offset.take();
         if let Err(err) = self.file.write_all(buf) {
             self.last_seek = None;
             return Err(err);
@@ -866,41 +867,6 @@ impl QueueFileInner {
 
         if let Some(seek) = &mut self.last_seek {
             *seek += buf.len() as u64;
-        }
-
-        if let Some(read_buffer_offset) = self.read_buffer_offset {
-            let write_size_u64 = buf.len() as u64;
-            let read_buffer_end_offset = read_buffer_offset + self.read_buffer.len() as u64;
-            let read_buffered = read_buffer_offset..read_buffer_end_offset;
-
-            let has_start = read_buffered.contains(&self.expected_seek);
-            let has_end = read_buffered.contains(&(self.expected_seek + write_size_u64));
-
-            match (has_start, has_end) {
-                // rd_buf_offset .. exp_seek .. exp_seek+buf.len .. rd_buf_end
-                // need to copy whole write buffer
-                (true, true) => {
-                    let start = (self.expected_seek - read_buffer_offset) as usize;
-                    self.read_buffer[start..start + buf.len()].copy_from_slice(buf);
-                }
-                // exp_seek .. rd_buf_offset .. exp_seek+buf.len .. rd_buf_end
-                // need to copy only a tail of write buffer
-                (false, true) => {
-                    let need_to_skip = (read_buffer_offset - self.expected_seek) as usize;
-                    let need_to_copy = buf.len() - need_to_skip;
-                    self.read_buffer[..need_to_copy].copy_from_slice(&buf[need_to_skip..]);
-                }
-                // rd_buf_offset .. exp_seek .. rd_buf_end .. exp_seek+buf.len
-                // need to copy only a head of write buffer
-                (true, false) => {
-                    let need_to_skip = (self.expected_seek - read_buffer_offset) as usize;
-                    let need_to_copy = self.read_buffer.len() - need_to_skip;
-                    self.read_buffer[need_to_skip..need_to_skip + need_to_copy]
-                        .copy_from_slice(&buf[..need_to_copy]);
-                }
-                // nothing to do, read & write buffers do not overlap
-                (false, false) => {}
-            }
         }
 
         if self.sync_writes {
