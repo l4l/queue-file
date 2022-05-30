@@ -23,6 +23,7 @@ use std::io;
 use std::io::prelude::*;
 use std::io::SeekFrom;
 use std::mem::ManuallyDrop;
+use std::ops::Range;
 use std::path::Path;
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -520,6 +521,13 @@ impl QueueFile {
             new_first_len = u32::from_be_bytes(buf) as usize;
         }
 
+        if erase_start_pos < new_first_pos {
+            self.inner.drop_cache_for(erase_start_pos..new_first_pos);
+        } else {
+            self.inner.drop_cache_for(erase_start_pos..self.file_len());
+            self.inner.drop_cache_for(self.header_len..new_first_pos);
+        }
+
         // Commit the header.
         self.write_header(self.file_len(), self.elem_cnt - n, new_first_pos, self.last.pos)?;
         self.elem_cnt -= n;
@@ -792,6 +800,31 @@ impl QueueFileInner {
         res
     }
 
+    fn read_buffered_range(&self) -> Range<u64> {
+        if let Some(read_buffer_offset) = self.read_buffer_offset {
+            let read_buffer_end_offset = read_buffer_offset + self.read_buffer.len() as u64;
+            read_buffer_offset..read_buffer_end_offset
+        } else {
+            0..0
+        }
+    }
+
+    fn drop_cache_for(&mut self, range: std::ops::Range<u64>) {
+        let read_buffered_range = self.read_buffered_range();
+
+        if read_buffered_range.is_empty() {
+            return;
+        }
+
+        if range.contains(&read_buffered_range.start)
+            || range.contains(&read_buffered_range.end.saturating_sub(1))
+            || read_buffered_range.contains(&range.start)
+            || read_buffered_range.contains(&range.end.saturating_sub(1))
+        {
+            self.read_buffer_offset.take();
+        }
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> io::Result<()> {
         if buf.len() == 0 {
             return Ok(());
@@ -866,8 +899,7 @@ impl QueueFileInner {
 
         if let Some(read_buffer_offset) = self.read_buffer_offset {
             let write_size_u64 = buf.len() as u64;
-            let read_buffer_end_offset = read_buffer_offset + self.read_buffer.len() as u64;
-            let read_buffered = read_buffer_offset..read_buffer_end_offset;
+            let read_buffered = self.read_buffered_range();
 
             let has_start = read_buffered.contains(&self.expected_seek);
             let buf_end = self.expected_seek + write_size_u64;
