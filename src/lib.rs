@@ -805,8 +805,15 @@ impl QueueFileInner {
                 .and_then(|skip| left.checked_sub(skip as usize))
                 .is_none()
         } else {
-            self.read_buffer.resize(size, 0);
-            true
+            // if buffer too big avoid using read_buffer.
+            self.real_seek()?;
+            let res = self.file.read_exact(buf);
+            if res.is_err() {
+                self.last_seek = None;
+            } else if let Some(last_seek) = self.last_seek.as_mut() {
+                *last_seek += buf.len() as u64;
+            }
+            return res;
         };
 
         if not_enough_data {
