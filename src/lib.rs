@@ -1270,7 +1270,7 @@ impl<'a> Iterator for Iter<'a> {
         };
 
         for _ in 0..left {
-            self.next();
+            self.borrowed_next();
         }
 
         self.next()
